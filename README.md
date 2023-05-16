@@ -3,11 +3,11 @@
 Utility bash script for testing wireless modules controlled by MBIM.
 
 Most frequently used testing procedures are implemented in these scripts.
-Calls to `mbimcli` and other utilities are wrapped by easy-to-rememeber CLI actions and options.
-Simple bash completions are provided as well.
+Calls to `mbimcli` and other utilities are wrapped by easy-to-rememeber CLI action names and options.
+Simple Bash completion scripts are provided as well.
 
 - tmbim-util: Common test operations using MBIM by calling `mbimcli`
-- dh-util: Calling DHCP client to configure IP and DNS
+- dh-util: Calling DHCP client to configure IP address and DNS
 - if-cfg: Configure IP, IPv6, and DNS settings manually
 
 ## Installation
@@ -25,7 +25,7 @@ Symbolic links to Bash completion scripts will be created to your home folder at
 - The actual `mbimcli` commands being used and responses are recorded into the log file `tmbim-util.log` under your home folder.
 - Default command line arguments can be put into the config file `tmbim-util.conf` under `~/bin` folder. An example `tmbim-util.conf.example` is provided for your reference.
 
-## Examples
+## Examples Usage of tmbim-util
 
 Show module current status
 
@@ -75,6 +75,12 @@ Show IP address and DNS settings of the connection
 tmbim-util ip
 ```
 
+Retrieve IP address and DNS settings and do manual config (by calling script `if-cfg`)
+
+```
+tmbim-util ifcfg
+```
+
 Release module connection
 
 ```
@@ -86,3 +92,31 @@ tmbim-util disconnect
 ```
 tmbim-util release
 ```
+
+## Examples Usage of if-cfg
+
+Config IPv4 address/mask and gateway
+
+```
+if-cfg ip4 25.117.174.145/30 25.117.174.146
+```
+NOTE: IP address/mask `25.117.174.145/30` and gateway IP address `25.117.174.146` can be retrieved from the response of `tmbmi-util ip`.
+
+Trigger IPv6 autoconfig (i.e., let kernel gets the prefix using SLAAC)
+
+```
+if-cfg ip6
+```
+
+Configure DNS
+
+```
+if-cfg dns 168.95.1.1
+```
+
+Configure multiple DNS
+
+```
+if-cfg dns "168.95.1.1 2001:b000:168::1"
+```
+NOTE: IP or IPv6 DNS address can be retrieved from the response of `tmbmi-util ip`.
