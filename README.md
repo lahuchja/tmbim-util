@@ -6,15 +6,46 @@ Most frequently used testing procedures are implemented in these scripts.
 Calls to `mbimcli` and other utilities are wrapped by easy-to-rememeber CLI actions and options.
 Simple bash completions are provided as well.
 
-- tmbim-util: Test operations using MBIM by calling `mbimcli`
-    - modem on / off
-    - connect / disconnect
-    - show modem status / conf
-    - ...
-- dh-util: Call DHCP client to configure IP and DNS
-    - request
-    - flush
+- tmbim-util: Common test operations using MBIM by calling `mbimcli`
+- dh-util: Calling DHCP client to configure IP and DNS
 - if-cfg: Configure IP, IPv6, and DNS settings manually
-    - set IP address / gateway manually
-    - trigger IPv6 autoconfig
-    - flush
+
+## Installation
+
+Sync the project to a local folder.
+
+Open a terminal, switch to the local folder, and run `install.sh`.
+
+Symbolic links will be created under your personal folders.
+
+## Examples
+
+Switch module to flight mode
+
+```
+tmbim-util off
+```
+
+Switch module to normal mode
+
+```
+tmbim-util on
+```
+
+Connect module using default APN and IP type settings
+
+```
+tmbim-util connect
+```
+
+Release module connection
+
+```
+tmbim-util disconnect
+```
+
+or
+
+```
+tmbim-util release
+```
