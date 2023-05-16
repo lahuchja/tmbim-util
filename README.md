@@ -8,7 +8,11 @@ Simple Bash completion scripts are provided as well.
 
 - tmbim-util: Common test operations using MBIM by calling `mbimcli`
 - dh-util: Calling DHCP client to configure IP address and DNS
-- if-cfg: Configure IP, IPv6, and DNS settings manually
+  + DHCP client `dhclient` and `udhcpc` are supported
+- if-cfg: Configure IP, IPv6, and DNS settings
+  + Set IP address/mask manually
+  + Trigger IPv6 autoconfig manually
+  + Set DNS (IP or IPv6) manually. `resolvconf` and `resolvectl` are supported
 
 ## Installation
 
@@ -95,6 +99,12 @@ tmbim-util release
 
 ## Examples Usage of if-cfg
 
+Show current IP and DNS settings
+
+```
+if-cfg show
+```
+
 Config IPv4 address/mask and gateway
 
 ```
@@ -102,10 +112,10 @@ if-cfg ip4 25.117.174.145/30 25.117.174.146
 ```
 NOTE: IP address/mask `25.117.174.145/30` and gateway IP address `25.117.174.146` can be retrieved from the response of `tmbmi-util ip`.
 
-Trigger IPv6 autoconfig (i.e., let kernel gets the prefix using SLAAC)
+Trigger IPv6 autoconfig (i.e., let kernel get the prefix via SLAAC)
 
 ```
-if-cfg ip6
+if-cfg 6
 ```
 
 Configure DNS
@@ -120,3 +130,29 @@ Configure multiple DNS
 if-cfg dns "168.95.1.1 2001:b000:168::1"
 ```
 NOTE: IP or IPv6 DNS address can be retrieved from the response of `tmbmi-util ip`.
+
+Flush IP, IPv6, and DNS settings
+
+```
+if-cfg flush
+```
+
+## Examples Usage of dh-util
+
+Use `dhclient` to request IP address and DNS settings
+
+```
+dh-util request
+```
+
+Use `udhcpc` to request IP address and DNS settings
+
+```
+dh-util -u request
+```
+
+Stop DHCP client process and flush IP and DNS settings
+
+```
+dh-util flush
+```
