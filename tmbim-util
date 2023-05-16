@@ -1,0 +1,415 @@
+#!/bin/bash
+# Program:
+#
+#   tmbim-util
+#
+#   Utility script calling frequently used mbimcli commands via proxy mode
+#
+#
+# Author: Hung Chun (James) Lai
+# 
+
+display_help() {
+    echo "Usage: "
+    echo "    `basename $0` [options] on      set radio state on"
+    echo "    `basename $0` [options] off     set radio state off"
+    echo "    `basename $0` [options] status  query modem status"
+    echo "    `basename $0` [options] signal  query modem signal"
+    echo
+    echo "    `basename $0` [options] ( conn | connect )     connect"
+    echo "    `basename $0` [options] ( disc | disconnect )  disconnect"
+    echo "    `basename $0` [options] ip      show IP configuration"
+    echo "    `basename $0` [options] ifcfg   retrieve IP/DNS settings and do manual config by calling if-cfg"
+
+    echo
+    echo "    `basename $0` [ -h | --help ]   display usage message"
+    echo
+    echo "For all commands:"
+    echo "  -v, --verbose    switch on verbose mode showing MBIM RAW packets"
+    echo "  -d <name>, --device <name>     specifiy the WDM device to connect (e.g., /dev/cdc-wdm0)"
+    echo
+    echo "For connect:"
+    echo "  -n <apn>, --apn <apn>          specify APN"
+    echo "  -p <type>, --ip-type <type>    specify IP protocol type ( 4 | 6 | dual )"
+    echo "  --dual                         specify IP protocol type as 'dual'"
+    echo "  -s <#>, --session <#>          specify session ID (useful for making additional connection)"
+    echo "  --auth           specify authentication type ( PAP | CHAP | MSCHAPV2 )"
+    echo "  --user           specify username for authentication"
+    echo "  --pass           specify password for authentication"
+    echo
+    echo "For show IP configuration & disconnect:"
+    echo "  -s <#>, --session <#>          specify session ID"
+    echo
+    echo "For ifcfg:"
+    echo "  -s <#>, --session <#>          specify session ID"
+    echo "  --iface <interface>            specify WWAN interface (e.g., wwan0)"
+    echo
+    echo "Miscellaneous:"
+    echo "  -h, --help       print usage message and quit"
+    echo
+}
+
+# More safety, by turning some bugs into errors.
+# Without `errexit` you don’t need ! and can replace
+# PIPESTATUS with a simple $?, but I don’t do that.
+set -o errexit -o pipefail -o noclobber -o nounset
+
+# -allow a command to fail with !’s side effect on errexit
+# -use return value from ${PIPESTATUS[0]}, because ! hosed $?
+! getopt --test > /dev/null 
+if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
+    echo '`getopt --test` failed in this environment.'
+    exit 1
+fi
+
+OPTIONS=hvd:n:p:s:
+LONGOPTS=help,verbose,dual,device:,apn:,ip-type:,session:,auth:,user:,pass:,iface:
+
+# -regarding ! and PIPESTATUS see above
+# -temporarily store output to be able to check for errors
+# -activate quoting/enhanced mode (e.g. by writing out “--options”)
+# -pass arguments only via   -- "$@"   to separate them correctly
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # e.g. return value is 1
+    #  then getopt has complained about wrong arguments to stdout
+    exit 2
+fi
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+LOG=~/tmbim-util.log
+CONF="`dirname "$0"`/tmbim-util.conf"
+VERB=""
+WDM="" APN="" IPTYPE="" SESSION="" AUTH="" USER="" PASS=""
+IFACE=""
+
+if [ -f "$CONF" ]; then
+  # taking default parameter values from the config file
+  . "$CONF"
+fi
+
+# overwrite parameter values by those from CLI
+while true; do
+    case "$1" in
+        -h|--help)
+            display_help
+            exit 0
+            ;;
+        -v|--verbose)
+            VERB=-v
+            shift
+            ;;
+        --dual)
+            IPTYPE=dual
+            shift
+            ;;
+        -d|--device)
+            WDM="$2"
+            shift 2
+            ;;
+        -n|--apn)
+            APN="$2"
+            shift 2
+            ;;
+        -p|--ip-type)
+            IPTYPE="$2"
+            shift 2
+            ;;
+        -s|--session)
+            SESSION="$2"
+            shift 2
+            ;;
+        --auth)
+            AUTH="$2"
+            shift 2
+            ;;
+        --user)
+            USER="$2"
+            shift 2
+            ;;
+        --pass)
+            PASS="$2"
+            shift 2
+            ;;
+        --iface)
+            IFACE="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Programming error"
+            exit 3
+            ;;
+    esac
+done
+
+# handle non-option arguments
+ACTION=status
+#if [[ $# -lt 1 ]]; then
+#    echo "$0: A command of either ( on | off | status | conn | disc ) is required."
+#    exit 4
+#fi
+if [[ $# -ge 1 ]]; then
+	ACTION=$1
+fi
+
+#echo "verbose: $VERB, device: $WDM, apn: $APN, protocol: $IPTYPE, session: $SESSION, auth: $AUTH, username: $USER, password: $PASS"
+
+# || : to do nothing when error
+
+# Specify the WDM device to default if it is still empty
+if [ -z ${WDM} ]; then
+    WDM=`ls /dev/cdc-wdm* 2>&1 | head -1 || :`
+    if [[ ${WDM} == *"No such file or directory"* ]]; then
+        >&2 echo "$0: cdc-wdm device not found"
+        exit 4
+    fi
+fi
+
+CLIVERCUR=$(mbimcli --version | sed -nE "s/mbimcli ([0-9\.]+)/\1/p")
+CLIVERMBIMEX3=1.28.0
+
+function version_ge() { test "$(echo "$@" | tr " " "\n" | sort -rV | head -n 1)" == "$1"; }
+#function version_le() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" == "$1"; }
+
+# init
+CMDPFX=""
+MBIMEXNEGO=""
+if version_ge $CLIVERCUR $CLIVERMBIMEX3; then
+    # MBIMEx version supported by mbimcli
+    # RES is multi-line so double quote is required 
+    RES="$( $(echo "sudo mbimcli ${VERB} -d ${WDM} --device-open-proxy --no-close --ms-query-version=1.0,3.0" | tee -a ${LOG}) | tee -a ${LOG} )"
+    # TODO: will get an error when we actually meet a MBIMEx 1.0 device?
+    #echo "${RES}"
+    MBIMEXNEGO=$(echo "${RES}" | sed -nE "s/ MBIM extended version : ([0-9]+\.[0-9]+)/\1/p")
+
+    if [[ ${MBIMEXNEGO} == "1.00" ]] ; then
+        CMDPFX="sudo mbimcli ${VERB} -d ${WDM} --device-open-proxy --no-close "
+    elif [[ ${MBIMEXNEGO} == "2.00" ]]; then
+        CMDPFX="sudo mbimcli ${VERB} -d ${WDM} --device-open-ms-mbimex-v2 --device-open-proxy --no-close "
+    else
+        # max v3 at this moment
+        CMDPFX="sudo mbimcli ${VERB} -d ${WDM} --device-open-ms-mbimex-v3 --device-open-proxy --no-close "
+    fi
+else
+    # MBIMEx version not supported by mbimcli, do not send --device-open-ms-mbimex-vx
+    CMDPFX="sudo mbimcli ${VERB} -d ${WDM} --device-open-proxy --no-close "
+fi
+
+function runCmd() {
+    $(echo $1 | tee -a ${LOG}) | tee -a ${LOG} 
+}
+
+function connect() {
+    # Build the connection string
+
+    # apn heading is a must
+    if version_ge $CLIVERCUR $CLIVERMBIMEX3; then
+		# replacing 'apn' for 'access-string' due to deprecation
+		CONNSTR=access-string=
+	else
+		CONNSTR=apn=
+	fi
+	
+    if [[ ! -z ${APN} ]]; then
+        CONNSTR=${CONNSTR}${APN}
+    fi
+
+    if [[ ! -z ${IPTYPE} ]]; then
+        # translate IPTYPE
+        if [[ ${IPTYPE} == 4 ]]; then
+            CONNSTR=${CONNSTR},ip-type=ipv4
+        elif [[ ${IPTYPE} == 6 ]]; then
+            CONNSTR=${CONNSTR},ip-type=ipv6
+        else
+            # all other cases go here
+            CONNSTR=${CONNSTR},ip-type=ipv4v6
+        fi
+    fi
+
+    # add other parameters
+    if [[ ! -z ${SESSION} ]]; then
+        CONNSTR=${CONNSTR},session-id=${SESSION}
+    fi
+    if [[ ! -z ${AUTH} ]]; then
+        CONNSTR=${CONNSTR},auth=${AUTH}
+    fi
+    if [[ ! -z ${USER} ]]; then
+        CONNSTR=${CONNSTR},username=${USER}
+    fi
+    if [[ ! -z ${PASS} ]]; then
+        CONNSTR=${CONNSTR},password=${PASS}
+    fi
+    
+    #echo "conn str: $CONNSTR"
+    runCmd "${CMDPFX} --connect=${CONNSTR}" 
+} 
+
+function disconnect() {
+    if [[ -z ${SESSION} ]]; then
+		runCmd "${CMDPFX} --disconnect"
+    else
+		runCmd "${CMDPFX} --disconnect=${SESSION}"
+    fi
+}
+
+function ifcfg() {
+    CMDSTATE=""
+    CMDIP=""
+    CMDIFCFG=""
+
+    if [[ -z ${SESSION} ]]; then
+		CMDSTATE="${CMDPFX} --query-connection-state"
+		CMDIP="${CMDPFX} --query-ip-configuration"
+        CMDIFCFG="`dirname "$0"`/if-cfg"
+    else
+		CMDSTATE="${CMDPFX} --query-connection-state=${SESSION}"
+		CMDIP="${CMDPFX} --query-ip-configuration=${SESSION}"
+        CMDIFCFG="`dirname "$0"`/if-cfg -s ${SESSION}"
+    fi
+
+    if [[ ! -z ${IFACE} ]] ; then
+        CMDIFCFG="${CMDIFCFG} -d ${IFACE}"
+    fi
+
+    read -r STATE TYPE <<< $(echo $(${CMDSTATE} 2>&1 | sed -nE "s/.+Activation state: '(.+)'|.+IP type: '(.+)'/\1\2/p"))
+    #echo STATE:${STATE} TYPE:${TYPE}
+    if [[ ${STATE} == deactivated ]] ; then
+        >&2 echo "$0: connection not activated"
+        exit 4
+    elif [[ ${TYPE} == ipv4 ]] ; then
+        ${CMDIFCFG} flush
+        echo
+        read -r IP GATEWAY DNS1 DNS2 <<< $(echo $(${CMDIP} 2>&1 | sed -nE "s/.+IP \[0\]: '([0-9\./]+)'|.+Gateway: '([0-9\.]+)'|.+DNS \[0\]: '([0-9\.]+)'|.+DNS \[1\]: '([0-9\.]+)'/\1\2\3\4/p"))
+        echo Calling if-cfg all ${IP} ${GATEWAY} \"${DNS1} ${DNS2}\" ...
+        echo
+        ${CMDIFCFG} all ${IP} ${GATEWAY} "${DNS1} ${DNS2}"
+    elif [[ ${TYPE} == ipv4v6 ]] ; then
+        # if-cfg always uses SLAAC for IPv6
+        ${CMDIFCFG} flush
+        echo
+        read -r IP GATEWAY DNSV4 DNSV6 <<< $(echo $(${CMDIP} 2>&1 | sed -nE "s/.+IP \[0\]: '([0-9\./]+)'|.+Gateway: '([0-9\.]+)'|.+DNS \[0\]: '([0-9\.]+)'|.+DNS \[0\]: '([0-9A-Fa-f:]+)'/\1\2\3\4/p"))
+        echo Calling if-cfg all ${IP} ${GATEWAY} \"${DNSV4} ${DNSV6}\" ...
+        echo
+        ${CMDIFCFG} all ${IP} ${GATEWAY} "${DNSV4} ${DNSV6}"
+    else
+        # if-cfg always uses SLAAC for IPv6
+        ${CMDIFCFG} flush
+        echo
+        echo Calling if-cfg for ipv6 autoconfig ...
+        echo
+        ${CMDIFCFG} ip6
+        echo
+        read -r DNS1 DNS2 <<< $(echo $(${CMDIP} 2>&1 | sed -nE "s/.+DNS \[0\]: '([0-9A-Fa-f:]+)'|.+DNS \[1\]: '([0-9A-Fa-f:]+)'/\1\2/p"))
+        echo Calling if-cfg dns \"${DNS1} ${DNS2}\" ...
+        echo
+        ${CMDIFCFG} dns "${DNS1} ${DNS2}"
+    fi
+}
+
+function ip() {
+    if [[ -z ${SESSION} ]]; then
+		runCmd "${CMDPFX} --query-connection-state"
+		echo
+		runCmd "${CMDPFX} --query-ip-configuration"
+    else
+		runCmd "${CMDPFX} --query-connection-state=${SESSION}"
+		echo
+		runCmd "${CMDPFX} --query-ip-configuration=${SESSION}"
+    fi
+}
+
+function status() {
+	runCmd "${CMDPFX} --query-subscriber-ready-status"
+	echo
+    runCmd "${CMDPFX} --query-pin-state"
+	echo
+    runCmd "${CMDPFX} --query-radio-state"
+	echo
+	runCmd "${CMDPFX} --ms-query-lte-attach-info"
+	echo
+	runCmd "${CMDPFX} --query-registration-state"
+	echo
+	runCmd "${CMDPFX} --query-packet-service-state"
+	echo
+}
+
+function config() {
+    
+	runCmd "${CMDPFX} --query-device-caps"
+	echo
+    runCmd "${CMDPFX} --ms-query-lte-attach-configuration"
+    echo
+    runCmd "${CMDPFX} --ms-query-provisioned-contexts"
+    echo
+
+    if version_ge $MBIMEXNEGO "3.00"; then
+    	runCmd "${CMDPFX} --ms-query-registration-parameters"
+	    echo
+    	runCmd "${CMDPFX} --ms-query-modem-configuration"
+	    echo
+    fi
+}
+
+function signal() {
+	runCmd "${CMDPFX} --query-signal-state"
+}
+
+function nitz() {
+    runCmd "${CMDPFX} --ms-query-nitz"
+    
+}
+
+function on() {
+    runCmd "${CMDPFX} --set-radio-state=on"
+}
+
+function off() {
+    runCmd "${CMDPFX} --set-radio-state=off"
+}
+
+# Check if parameter is set to execute
+case "$ACTION" in
+    conf|config)
+        config
+        ;;
+    conn|connect)
+        connect
+        ;;
+    disc|disconnect|rel|release)
+        disconnect
+        ;;
+    ifcfg)
+        ifcfg
+        ;;
+    ip)
+        ip
+        ;;
+    nitz)
+        nitz
+        ;;
+    off)
+        off
+        ;;
+    on)
+        on
+        ;;
+	pfx|prefix)
+		echo ${CMDPFX}
+		;;
+    status|show)
+        status
+        ;;
+    sig|signal)
+        signal
+        ;;
+    *)
+        display_help
+
+        exit 1
+        ;;
+esac

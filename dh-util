@@ -1,0 +1,262 @@
+#!/bin/bash
+# Program:
+#
+#   dh-util
+#
+#   Utility script calling frequently used ip and dhclient commands
+#
+#
+# Author: Hung Chun (James) Lai
+#
+
+display_help() {
+    echo "Usage: "
+    echo "    `basename $0` [options] request        start a DHCP request"
+    echo "    `basename $0` [options] flush          "
+    echo
+    echo "    `basename $0` ( -h | --help )          display usage message"
+    echo
+    echo "Common:"
+    echo "  -d <dev>, --device <dev>  specifiy the network device (default: wwan0)"    
+    echo "  -s <id>, --session <id>   specifiy the vlan ID (e.g., 1)"    
+    echo
+    echo "Request:"
+    echo "  -u, --udhcpc              use udhcpc instead of dhclient"
+    echo
+    echo "Flush:"
+    echo "  -r, --release             intentionally do a DHCP Release (dhclient only)"
+    echo "  --kill-all                kill all dhclient or udhcpc processes found running"
+    echo
+    echo "Miscellaneous:"
+    echo "  -v, --verbose             show verbose dhclient log message"
+    echo "  -h, --help                print usage message and quit"
+    echo
+}
+
+# More safety, by turning some bugs into errors.
+# Without `errexit` you don’t need ! and can replace
+# PIPESTATUS with a simple $?, but I don’t do that.
+set -o errexit -o pipefail -o noclobber -o nounset
+
+# -allow a command to fail with !’s side effect on errexit
+# -use return value from ${PIPESTATUS[0]}, because ! hosed $?
+! getopt --test > /dev/null 
+if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
+    echo '`getopt --test` failed in this environment.'
+    exit 1
+fi
+
+OPTIONS=hvd:rs:u
+LONGOPTS=help,verbose,device:,release,session:,udhcpc,kill-all
+
+# -regarding ! and PIPESTATUS see above
+# -temporarily store output to be able to check for errors
+# -activate quoting/enhanced mode (e.g. by writing out “--options”)
+# -pass arguments only via   -- "$@"   to separate them correctly
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # e.g. return value is 1
+    #  then getopt has complained about wrong arguments to stdout
+    exit 2
+fi
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+LOG=~/dh-util.log
+VERB="" DEV="wwan0" VLAN="" REL=n UDH=n KA=n
+# now enjoy the options in order and nicely split until we see --
+while true; do
+    case "$1" in
+        -h|--help)
+            display_help
+            exit 0
+            ;;
+        -v|--verbose)
+            VERB=-v
+            shift
+            ;;
+        -d|--device)
+            DEV="$2"
+            shift 2
+            ;;
+        -u|--udhcpc)
+            UDH=y
+            shift
+            ;;
+        -r|--release)
+            REL=y
+            shift
+            ;;
+        --kill-all)
+            KA=y
+            shift
+            ;;
+        -s|--session)
+            VLAN="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Programming error"
+            exit 3
+            ;;
+    esac
+done
+
+# handle non-option arguments
+ACTION=req
+#if [[ $# -lt 1 ]]; then
+#    echo "$0: A command of either ( req | flush ) is required."
+#    exit 4
+#fi
+if [[ $# -ge 1 ]]; then
+	ACTION=$1
+fi
+
+IFCE=${DEV}
+if [ ! -z ${VLAN} ]; then
+    IFCE=${DEV}.${VLAN}
+fi
+
+function runCmd() {
+  # $1: command string
+  $(echo $1 | tee -a ${LOG}) | tee -a ${LOG}
+}
+
+function print_ip() {
+    echo '== v4 addr =='
+    runCmd "sudo ip -br -4 addr show dev ${IFCE}"
+    echo '== v4 route =='
+    runCmd "sudo ip -4 route list dev ${IFCE}"
+}
+
+function print_dns() {
+    echo '== dns =='
+    if hash resolvconf 2>/dev/null ; then
+        runCmd "sudo resolvconf -l ${IFCE}"
+    else
+        # TODO: more DNS tool?
+        runCmd "sudo resolvectl status ${IFCE}"
+    fi
+}
+
+function request() {
+    
+    if [ ! -z ${VLAN} ]; then
+    	if  ! ip link show ${IFCE} > /dev/null 2>&1; then
+            echo "Creating VLAN ..."
+            runCmd "sudo ip link add link ${DEV} name ${IFCE} type vlan id ${VLAN}"
+    	fi
+        
+        # parent device needs to be up first
+        runCmd "sudo ip link set ${DEV} up"
+    fi
+	
+    # avoid switching IFCE down so that wireshark live capture won't break
+    #sudo ip link set ${IFCE} down
+        
+    runCmd "sudo ip link set ${IFCE} up"
+     
+    if [ ${UDH} = y ]; then
+        echo "Starting udhcpc ..."
+        runCmd "sudo udhcpc -i ${IFCE} -p /var/run/udhcpc.pid"
+    else
+        echo "Starting dhclient ..."
+        runCmd "sudo dhclient ${VERB} ${IFCE}"
+    fi
+    
+    print_ip
+    print_dns
+}
+
+function flush() {
+
+    if [ ! -z ${VLAN} ]; then
+        if ip link show ${IFCE} > /dev/null 2>&1 ; then
+            echo
+        else
+            echo "${IFCE} is not present!"
+            return 
+        fi
+    fi
+
+    if [ ${REL} == y ]; then
+        if [ ${UDH} == y ]; then
+            # udhcpc -R seems not working as expected
+            #sudo udhcpc -R -i ${IFCE}
+            echo "Bypassing the release option for udhcpc ..."
+            # make use of the PID file    
+            ! runCmd "sudo pkill -F /var/run/udhcpc.pid" > /dev/null 2>&1
+        else
+            runCmd "sudo dhclient -r ${IFCE}"
+        fi
+    else
+        if [ ${UDH} == y ]; then
+            # make use of the PID file    
+            ! runCmd "sudo pkill -F /var/run/udhcpc.pid" > /dev/null 2>&1
+        else
+            runCmd "sudo dhclient -x ${IFCE}"
+            #! sudo pkill -F /var/run/dhclient.pid  > /dev/null
+        fi
+    fi
+
+    if [ ${KA} == y ]; then
+        if [ ${UDH} == y ]; then
+            PIDS=`ps -Af | sed -nEe "s/root + ([0-9]+) + [0-9]+.+udhcpc -i ${IFCE} -p.+/\1/p"`
+            if [ ! -z "${PIDS}" ]; then
+                echo "Killing old udhcpc process running with this interface ..."
+                for pid in ${PIDS}; do
+                    runCmd "sudo kill ${pid}"
+                done
+            fi
+        else
+            #echo "--kill-all ..."
+            PIDS=`ps -Af | sed -nEe "s/root + ([0-9]+) + [0-9]+.+dhclient ${IFCE}.*/\1/p"`
+            if [ ! -z "${PIDS}" ]; then
+                echo "Killing other old client process running with this interface ..."
+	            for pid in ${PIDS}; do
+	        	    runCmd "sudo kill ${pid}"
+	        	done
+            fi
+        fi
+    fi
+
+    echo "Flushing IP address ..."
+    runCmd "sudo ip -4 addr flush dev ${IFCE}"
+
+    echo "Flushing route ..."
+    runCmd "sudo ip -4 route flush dev ${IFCE}"
+    
+    # do not flush DNS settings and let the tool handle them
+    #echo "Reverting DNS setting ..."
+    #sudo resolvectl revert ${IFCE}
+    
+    #sudo ip link set ${IFCE} down
+
+    #if [ ! -z ${VLAN} ]; then
+    #    sudo ip link del ${IFCE}    
+    #fi
+
+    print_ip
+    #print_dns
+}
+
+
+# Check if parameter is set to execute
+case "$ACTION" in
+    r|req|request)
+        request
+        ;;
+    f|flush)
+        flush
+        ;;
+    *)
+        display_help
+
+        exit 1
+        ;;
+esac
+

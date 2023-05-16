@@ -1,0 +1,22 @@
+#
+# mbim-conn default parameters
+#
+
+# name of WDM device
+WDM=/dev/cdc-wdm1
+
+# APN
+#APN=internet
+
+# IP type, e.g., ipv4, ipv6, ipv4v6
+#IPTYPE=
+
+# session ID
+#SESSION=
+
+# authentication type, e.g., PAP, CHAP, MSCHAPV2
+#AUTH=
+
+# username and password for authentication
+#USER=
+#PASS=

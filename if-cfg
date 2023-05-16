@@ -1,0 +1,316 @@
+#!/bin/bash
+# Program:
+#
+#   if-cfg
+#
+#   
+#
+#
+# Author: Hung Chun (James) Lai
+#
+
+display_help() {
+    echo "Usage: "
+    echo "    `basename $0` [options] ip <ip/mask> <gateway>    setup IP manually and trigger IPv6 autoconfig"
+    echo "    `basename $0` [options] ip4 <ip/mask> <gateway>   setup IP manually"
+    echo "    `basename $0` [options] ip6                       trigger IPv6 autoconfig"
+    echo ""
+    echo "    `basename $0` [options] dns <dns-ip>              assign DNS manually"
+    echo "    `basename $0` [options] dns \"<dns1> <dns2>\"       assigning multiple DNSs"
+    echo ""
+    echo "    `basename $0` [options] all <ip/mask> <gateway> \"<dns1> <dns2>\"       assigning IP and DNS"
+    echo ""
+    echo "    `basename $0` [options] flush                     flush IP, IPv6 and DNS settings"
+    echo "    `basename $0` [options] show                      show IP, IPv6 and DNS settings"
+    echo
+    echo "    `basename $0` ( -h | --help )                     display usage message"
+    echo
+    echo "Common:"
+    echo "  -d <dev>, --device <dev>, --iface <dev>             specifiy the network device (default: wwan0)"
+    echo "  -s <id>, --session <id>                             specifiy the vlan ID (e.g., 1)"
+    echo
+    echo "Miscellaneous:"
+    echo "  -h, --help                print usage message and quit"
+    echo
+}
+
+# More safety, by turning some bugs into errors.
+# Without `errexit` you don’t need ! and can replace
+# PIPESTATUS with a simple $?, but I don’t do that.
+set -o errexit -o pipefail -o noclobber -o nounset
+
+# -allow a command to fail with !’s side effect on errexit
+# -use return value from ${PIPESTATUS[0]}, because ! hosed $?
+! getopt --test > /dev/null
+if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
+    echo '`getopt --test` failed in this environment.'
+    exit 1
+fi
+
+OPTIONS=vd:s:
+LONGOPTS=help,verbose,device:,iface:,session:
+
+# -regarding ! and PIPESTATUS see above
+# -temporarily store output to be able to check for errors
+# -activate quoting/enhanced mode (e.g. by writing out “--options”)
+# -pass arguments only via   -- "$@"   to separate them correctly
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # e.g. return value is 1
+    #  then getopt has complained about wrong arguments to stdout
+    exit 2
+fi
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+DEV="wwan0"
+#TODO: have more than one wwan interface
+
+VERB="" VLAN=""
+# now enjoy the options in order and nicely split until we see --
+while true; do
+    case "$1" in
+        -h|--help)
+            display_help
+            exit 0
+            ;;
+        -v|--verbose)
+            VERB=-v
+            shift
+            ;;
+        -d|--device|--iface)
+            DEV="$2"
+            shift 2
+            ;;
+        -s|--session)
+            VLAN="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Programming error"
+            exit 3
+            ;;
+    esac
+done
+
+ACTION=show
+#if [[ $# -lt 1 ]]; then
+#    echo "$0: A command of either ( req | flush ) is required."
+#    exit 4
+#fi
+if [[ $# -ge 1 ]]; then
+	ACTION=$1
+fi
+
+IFCE=${DEV}
+if [ ! -z ${VLAN} ]; then
+    IFCE=${DEV}.${VLAN}
+fi
+
+function create_vlan() {
+   	if  ! ip link show ${IFCE} > /dev/null 2>&1; then
+        echo "Creating VLAN ..."
+        sudo ip link add link ${DEV} name ${IFCE} type vlan id ${VLAN}
+   	fi
+
+    # parent device needs to be up first
+    sudo ip link set ${DEV} up
+}
+
+function delete_vlan() {
+    sudo ip link del ${IFCE}
+}
+
+function ip4() {
+    # $1: IP address/Mask
+    # $2: Gateway
+
+    if [ ! -z ${VLAN} ]; then
+        create_vlan
+    fi
+
+    sudo ip link set ${IFCE} up
+
+    sudo ip -4 address add $1 dev ${IFCE}
+    sudo ip -4 route add default via $2 dev ${IFCE}
+
+    echo '== v4 addr =='
+    sudo ip -br -4 address show dev ${IFCE}
+    echo
+    echo '== v4 route =='
+    sudo ip -br -4 route list dev ${IFCE}
+    echo
+}
+
+function ip6() {
+    if [ ! -z ${VLAN} ]; then
+        create_vlan
+    fi
+
+    sudo ip link set ${IFCE} up
+
+    #echo 1 | sudo tee -a /proc/sys/net/ipv6/conf/${IFCE}/disable_ipv6 > /dev/null
+    #echo 0 | sudo tee -a /proc/sys/net/ipv6/conf/${IFCE}/disable_ipv6 > /dev/null
+    # using sysctl instead
+    sudo sysctl -w net.ipv6.conf.${IFCE}.disable_ipv6=1 > /dev/null
+    sudo sysctl -w net.ipv6.conf.${IFCE}.disable_ipv6=0 > /dev/null
+       
+    # wwan0 link may stay in UNKNOWN state instead of UP
+    # in this case extra steps are needed to force link local address regenration for SLAAC
+    sudo sysctl -w net.ipv6.conf.${IFCE}.addr_gen_mode=0 > /dev/null
+    sudo sysctl -w net.ipv6.conf.${IFCE}.addr_gen_mode=1 > /dev/null
+
+    echo '== v6 addr global =='
+    sudo ip -br -6 addr show dev ${IFCE} scope global
+    echo
+    echo '== v6 route =='
+    sudo ip -br -6 route list dev ${IFCE}
+    echo
+}
+
+function ip() {
+    # $1: IP address/Mask
+    # $2: Gateway
+    ip6
+    ip4 $1 $2
+}
+
+function dns() {
+    # $1: DNS servers IP address
+    
+    # multiple DNS servers are separated using $1 without ""
+    echo '== dns =='
+    if hash resolvconf 2>/dev/null ; then
+        dnsstr=""
+        for i in $1
+        do
+            :
+            #echo "concat $i ..."
+            dnsstr=${dnsstr}"nameserver "${i}"\n"
+        done
+        #echo "dnsstr: "${dnsstr}
+        echo -e $dnsstr | sudo resolvconf -a ${IFCE}
+        sudo resolvconf -l ${IFCE}
+    else
+        # TODO: more DNS tool?
+        sudo resolvectl dns ${IFCE} $1
+        sudo resolvectl default-route ${IFCE} yes
+        sudo resolvectl status ${IFCE}
+    fi
+}
+
+function link_local() {
+    
+    echo "== Old link local =="
+    sudo ip -br -6 addr show dev wwan0 scope link
+
+    echo "Flushing link local ..."
+    sudo ip -6 addr flush dev ${IFCE} scope link
+
+    echo "Regenerating link local ..."    
+    sudo sysctl -w net.ipv6.conf.${IFCE}.addr_gen_mode=0 > /dev/null
+    sudo sysctl -w net.ipv6.conf.${IFCE}.addr_gen_mode=1 > /dev/null
+
+    echo "== New link local =="
+    sudo ip -br -6 addr show dev wwan0 scope link
+}
+
+function flush() {
+
+    echo "Flushing v6 ..."
+    # flush all v6 address, including link local and global
+    sudo ip -6 addr flush dev ${IFCE}
+    sudo ip -6 route flush dev ${IFCE}
+    echo '== v6 addr global =='
+    sudo ip -br -6 addr show dev ${IFCE} scope global
+    echo
+    echo '== v6 route =='
+    sudo ip -br -6 route list dev ${IFCE}
+    echo
+
+    echo "Flushing v4 ..."
+    sudo ip -4 addr flush dev ${IFCE}
+    sudo ip -4 route flush dev ${IFCE}
+    echo '== v4 addr =='
+    sudo ip -br -4 address show dev ${IFCE}
+    echo
+    echo '== v4 route =='
+    sudo ip -br -4 route list dev ${IFCE}
+    echo
+
+    echo "Deleting DNS config ..."
+    echo '== dns =='
+    if hash resolvconf 2>/dev/null ; then
+        sudo resolvconf -d ${IFCE}
+        sudo resolvconf -l ${IFCE}
+        echo
+    else
+        # TODO: more DNS tool?
+        sudo resolvectl revert ${IFCE}
+        sudo resolvectl status ${IFCE}
+        echo
+    fi
+
+    #sudo ip link set ${IFCE} down
+
+    #if [ ! -z ${VLAN} ]; then
+    #    delete_vlan
+    #fi
+
+}
+
+function show() {
+    echo '== v6 addr global =='
+    sudo ip -br -6 addr show dev ${IFCE} scope global
+    echo
+    echo '== v6 route =='
+    sudo ip -br -6 route list dev ${IFCE}
+    echo
+    echo '== v4 addr =='
+    sudo ip -br -4 address show dev ${IFCE}
+    echo
+    echo '== v4 route =='
+    sudo ip -br -4 route list dev ${IFCE}
+    echo
+    echo '== dns =='
+    sudo resolvectl status ${IFCE}
+    echo
+}
+
+# Check if parameter is set to execute
+case "$ACTION" in
+    all)
+        ip $2 $3
+        dns "$4"
+        ;;
+    ip)
+        ip $2 $3
+        ;;
+    4|ip4)
+        ip4 $2 $3
+        ;;
+    6|ip6)
+        ip6
+        ;;
+    l|link_local)
+        link_local
+        ;;
+    d|dns)
+        dns "$2"
+        ;;
+    f|flush)
+        flush
+        ;;
+    s|show)
+        show
+        ;;
+    *)
+        display_help
+
+        exit 1
+        ;;
+esac
