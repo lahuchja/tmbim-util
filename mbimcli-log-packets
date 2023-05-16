@@ -1,7 +1,7 @@
 #!/bin/bash
 # Program:
 #
-#   mm-log-packet
+#   mbimcli-log-packet
 #
 #   Takes mbimcli verbose log from STDIN and filters out RAW packets and converts them into pcapng format
 #
@@ -22,7 +22,7 @@ if [ "$1" == "-h" ] || [ "$1" == "--help" ] ; then
     echo "Usage: "
     echo "    `basename $0` <infile> <outfile>"
     echo
-    echo "where <infile>  specifies ModemManager debug log file, e.g., /var/log/syslog (use - for standard input)"
+    echo "where <infile>  specifies mbimcli debug log file (use - for standard input)"
     echo "      <outfile> specifies output packet file name, e.g., packet.pcapng"
     echo
     echo "Filter out MBIM RAW packets from ModemManger debug log and convert them into pcapng format."
