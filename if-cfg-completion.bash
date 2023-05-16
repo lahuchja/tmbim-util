@@ -4,4 +4,4 @@
 # source <path-to-your-script>/<script>-completion.bash
 #
 
-complete -W "ip ip4 ip6 dns flush" if-cfg
+complete -W "4 6 ip ip4 ip6 dns flush" if-cfg
