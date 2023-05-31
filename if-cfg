@@ -3,11 +3,11 @@
 #
 #   if-cfg
 #
-#   
+#   Utility test script handling IP and DNS address configuration to WWAN interface
 #
 #
 # Author: Hung Chun (James) Lai
-#
+# 
 
 display_help() {
     echo "Usage: "
@@ -15,10 +15,10 @@ display_help() {
     echo "    `basename $0` [options] ip4 <ip/mask> <gateway>   setup IP manually"
     echo "    `basename $0` [options] ip6                       trigger IPv6 autoconfig"
     echo ""
-    echo "    `basename $0` [options] dns <dns-ip>              assign DNS manually"
-    echo "    `basename $0` [options] dns \"<dns1> <dns2>\"       assigning multiple DNSs"
+    echo "    `basename $0` [options] dns <dns>                 assign DNS address manually"
+    echo "    `basename $0` [options] dns <dns1>,<dns2>         assigning multiple DNS seperated with ','"
     echo ""
-    echo "    `basename $0` [options] all <ip/mask> <gateway> \"<dns1> <dns2>\"       assigning IP and DNS"
+    echo "    `basename $0` [options] all <ip/mask> <gateway> <dns1>,<dns2>       equals to 'ip' + 'dns'"
     echo ""
     echo "    `basename $0` [options] flush                     flush IP, IPv6 and DNS settings"
     echo "    `basename $0` [options] show                      show IP, IPv6 and DNS settings"
@@ -28,6 +28,9 @@ display_help() {
     echo "Common:"
     echo "  -d <dev>, --device <dev>, --iface <dev>             specifiy the network device (default: wwan0)"
     echo "  -s <id>, --session <id>                             specifiy the vlan ID (e.g., 1)"
+    echo
+    echo "For ip4, ip and all:"
+    echo "  -m <mtu>, --mtu <mtu>                               specifiy IPv4 MTU"
     echo
     echo "Miscellaneous:"
     echo "  -h, --help                print usage message and quit"
@@ -47,8 +50,8 @@ if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
     exit 1
 fi
 
-OPTIONS=vd:s:
-LONGOPTS=help,verbose,device:,iface:,session:
+OPTIONS=vd:s:m:
+LONGOPTS=help,verbose,device:,iface:,session:,mtu:
 
 # -regarding ! and PIPESTATUS see above
 # -temporarily store output to be able to check for errors
@@ -66,7 +69,7 @@ eval set -- "$PARSED"
 DEV="wwan0"
 #TODO: have more than one wwan interface
 
-VERB="" VLAN=""
+VERB="" VLAN="" MTU=""
 # now enjoy the options in order and nicely split until we see --
 while true; do
     case "$1" in
@@ -80,6 +83,10 @@ while true; do
             ;;
         -d|--device|--iface)
             DEV="$2"
+            shift 2
+            ;;
+        -m|--mtu)
+            MTU="$2"
             shift 2
             ;;
         -s|--session)
@@ -134,6 +141,9 @@ function ip4() {
     fi
 
     sudo ip link set ${IFCE} up
+    if [[ ! -z ${MTU} ]] ; then
+        sudo ip link set ${IFCE} mtu ${MTU}
+    fi
 
     sudo ip -4 address add $1 dev ${IFCE}
     sudo ip -4 route add default via $2 dev ${IFCE}
@@ -184,10 +194,10 @@ function dns() {
     
     # multiple DNS servers are separated using $1 without ""
     echo '== dns =='
+    IFS=',' read -ra DNSADDRS <<< "$1"
     if hash resolvconf 2>/dev/null ; then
         dnsstr=""
-        for i in $1
-        do
+        for i in "${DNSADDRS[@]}" ; do
             :
             #echo "concat $i ..."
             dnsstr=${dnsstr}"nameserver "${i}"\n"
@@ -196,8 +206,9 @@ function dns() {
         echo -e $dnsstr | sudo resolvconf -a ${IFCE}
         sudo resolvconf -l ${IFCE}
     else
+        # default DNS tool: resolvectl
         # TODO: more DNS tool?
-        sudo resolvectl dns ${IFCE} $1
+        sudo resolvectl dns ${IFCE} ${DNSADDRS[@]}
         sudo resolvectl default-route ${IFCE} yes
         sudo resolvectl status ${IFCE}
     fi
@@ -285,7 +296,7 @@ function show() {
 case "$ACTION" in
     all)
         ip $2 $3
-        dns "$4"
+        dns $4
         ;;
     ip)
         ip $2 $3
@@ -300,7 +311,7 @@ case "$ACTION" in
         link_local
         ;;
     d|dns)
-        dns "$2"
+        dns $2
         ;;
     f|flush)
         flush

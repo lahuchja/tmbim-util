@@ -67,10 +67,16 @@ Make module connection using default APN and IP type settings
 tmbim-util connect
 ```
 
-Make module connection using APN `internet` with IPv4 only
+Make module connection using APN `internet` with IPv4v6 dual stack
 
 ```
-tmbim-util --apn internet --ip-type 4 connect
+tmbim-util --apn internet --dual connect
+```
+
+Make module connection using APN `fast.t-mobile.com` with IPv6 only
+
+```
+tmbim-util --apn fast.t-mobile.com --ip-type 6 connect
 ```
 
 Show IP address and DNS settings of the connection
@@ -95,6 +101,12 @@ tmbim-util disconnect
 
 ```
 tmbim-util release
+```
+
+Report signal strength
+
+```
+tmbim-util signal
 ```
 
 ## Examples Usage of if-cfg
